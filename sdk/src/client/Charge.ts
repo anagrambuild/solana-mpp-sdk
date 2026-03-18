@@ -87,6 +87,8 @@ export function charge(parameters: charge.Parameters) {
         feePayerKey: feePayerKey || undefined,
       })
 
+      const useServerFeePayer = serverPaysFees && feePayerKey && !broadcast
+
       // Build transfer instructions.
       const instructions: Instruction[] = []
 
@@ -108,9 +110,10 @@ export function charge(parameters: charge.Parameters) {
         })
 
         // Create destination ATA if it doesn't exist (idempotent).
+        // When the server pays fees, use the fee payer as the ATA rent payer too.
         instructions.push(
           createAssociatedTokenAccountIdempotent(
-            signer,
+            useServerFeePayer ? address(feePayerKey) : signer.address,
             address(recipient),
             mint,
             destAta,
@@ -148,8 +151,6 @@ export function charge(parameters: charge.Parameters) {
       const { value: latestBlockhash } = await rpc
         .getLatestBlockhash()
         .send()
-
-      const useServerFeePayer = serverPaysFees && feePayerKey && !broadcast
 
       const txMessage = pipe(
         createTransactionMessage({ version: 0 }),
@@ -210,9 +211,12 @@ export function charge(parameters: charge.Parameters) {
 /**
  * Creates an Associated Token Account using the idempotent instruction
  * (CreateIdempotent = discriminator 1). This is a no-op if the ATA exists.
+ *
+ * The payer is an address (not a signer) — in fee payer mode, the server's
+ * fee payer key covers ATA rent and the server adds its signature server-side.
  */
 function createAssociatedTokenAccountIdempotent(
-  payer: TransactionSigner,
+  payer: ReturnType<typeof address>,
   owner: ReturnType<typeof address>,
   mint: ReturnType<typeof address>,
   ata: ReturnType<typeof address>,
@@ -221,7 +225,7 @@ function createAssociatedTokenAccountIdempotent(
   return {
     programAddress: address(ASSOCIATED_TOKEN_PROGRAM),
     accounts: [
-      { address: payer.address, role: AccountRole.WRITABLE_SIGNER, signer: payer } as any,
+      { address: payer, role: AccountRole.WRITABLE_SIGNER },
       { address: ata, role: AccountRole.WRITABLE },
       { address: owner, role: AccountRole.READONLY },
       { address: mint, role: AccountRole.READONLY },
