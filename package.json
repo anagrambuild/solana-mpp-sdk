@@ -29,6 +29,7 @@
     "demo:app": "cd demo/app && npm run dev"
   },
   "dependencies": {
+    "@solana-program/compute-budget": "^0.15.0",
     "@solana-program/system": "^0.11.0",
     "@solana-program/token": "^0.11.0"
   },

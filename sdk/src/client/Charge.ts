@@ -6,20 +6,26 @@ import {
   setTransactionMessageFeePayer,
   setTransactionMessageFeePayerSigner,
   setTransactionMessageLifetimeUsingBlockhash,
-  setTransactionMessageComputeUnitLimit,
-  setTransactionMessageComputeUnitPrice,
   appendTransactionMessageInstructions,
+  prependTransactionMessageInstructions,
   signTransactionMessageWithSigners,
   partiallySignTransactionMessageWithSigners,
   getBase64EncodedWireTransaction,
   address,
+  signature as toSignature,
   AccountRole,
+  type Address,
   type TransactionSigner,
   type Instruction,
 } from '@solana/kit'
 import { getTransferSolInstruction } from '@solana-program/system'
 import {
+  getSetComputeUnitLimitInstruction,
+  getSetComputeUnitPriceInstruction,
+} from '@solana-program/compute-budget'
+import {
   getTransferCheckedInstruction,
+  getCreateAssociatedTokenIdempotentInstruction,
   findAssociatedTokenPda,
 } from '@solana-program/token'
 import * as Methods from '../Methods.js'
@@ -110,16 +116,30 @@ export function charge(parameters: charge.Parameters) {
         })
 
         // Create destination ATA if it doesn't exist (idempotent).
-        // When the server pays fees, use the fee payer as the ATA rent payer too.
-        instructions.push(
-          createAssociatedTokenAccountIdempotent(
-            useServerFeePayer ? address(feePayerKey) : signer.address,
-            address(recipient),
-            mint,
-            destAta,
-            tokenProg,
-          ),
-        )
+        if (useServerFeePayer) {
+          // In fee payer mode, the server's key pays ATA rent.
+          // We build the instruction manually since the payer isn't a local signer.
+          instructions.push(
+            createAssociatedTokenAccountIdempotent(
+              address(feePayerKey),
+              address(recipient),
+              mint,
+              destAta,
+              tokenProg,
+            ),
+          )
+        } else {
+          // Standard mode: client pays ATA rent via Codama-generated instruction.
+          instructions.push(
+            getCreateAssociatedTokenIdempotentInstruction({
+              payer: signer,
+              ata: destAta,
+              owner: address(recipient),
+              mint,
+              tokenProgram: tokenProg,
+            }),
+          )
+        }
 
         instructions.push(
           getTransferCheckedInstruction(
@@ -159,9 +179,16 @@ export function charge(parameters: charge.Parameters) {
             ? setTransactionMessageFeePayer(address(feePayerKey), msg)
             : setTransactionMessageFeePayerSigner(signer, msg),
         (msg) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, msg),
-        (msg) => setTransactionMessageComputeUnitLimit(50_000, msg),
-        (msg) => setTransactionMessageComputeUnitPrice(1n, msg),
         (msg) => appendTransactionMessageInstructions(instructions, msg),
+        // Prepend compute budget instructions per best practice.
+        (msg) =>
+          prependTransactionMessageInstructions(
+            [
+              getSetComputeUnitPriceInstruction({ microLamports: parameters.computeUnitPrice ?? 1n }),
+              getSetComputeUnitLimitInstruction({ units: parameters.computeUnitLimit ?? 50_000 }),
+            ],
+            msg,
+          ),
       )
 
       // When server pays fees, partially sign (only the transfer authority).
@@ -212,15 +239,15 @@ export function charge(parameters: charge.Parameters) {
  * Creates an Associated Token Account using the idempotent instruction
  * (CreateIdempotent = discriminator 1). This is a no-op if the ATA exists.
  *
- * The payer is an address (not a signer) — in fee payer mode, the server's
- * fee payer key covers ATA rent and the server adds its signature server-side.
+ * Used in fee payer mode where the payer is the server's key (not a local
+ * signer). The server adds its signature before broadcasting.
  */
 function createAssociatedTokenAccountIdempotent(
-  payer: ReturnType<typeof address>,
-  owner: ReturnType<typeof address>,
-  mint: ReturnType<typeof address>,
-  ata: ReturnType<typeof address>,
-  tokenProgram: ReturnType<typeof address>,
+  payer: Address,
+  owner: Address,
+  mint: Address,
+  ata: Address,
+  tokenProgram: Address,
 ): Instruction {
   return {
     programAddress: address(ASSOCIATED_TOKEN_PROGRAM),
@@ -248,7 +275,7 @@ async function confirmTransaction(
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
     const { value } = await rpc
-      .getSignatureStatuses([signature] as any)
+      .getSignatureStatuses([toSignature(signature)])
       .send()
     const status = value[0]
     if (status) {
@@ -289,6 +316,10 @@ export declare namespace charge {
      * Cannot be used with server fee sponsorship (feePayer mode).
      */
     broadcast?: boolean
+    /** Compute unit price in micro-lamports for priority fees. Defaults to 1. */
+    computeUnitPrice?: bigint
+    /** Compute unit limit. Defaults to 50,000. */
+    computeUnitLimit?: number
     /** Called at each step of the payment process. */
     onProgress?: (event: ProgressEvent) => void
   }
